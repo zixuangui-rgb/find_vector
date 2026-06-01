@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+"""Extract response-pooled hidden states for one data shard."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import time
+from pathlib import Path
+
+import numpy as np
+from tqdm import tqdm
+
+from experiment_common import (
+    REPO_ROOT,
+    ensure_run_dirs,
+    load_processor_and_model,
+    read_config,
+    read_jsonl,
+    resolve_repo_path,
+    response_mean_activations,
+    seed_everything,
+    shard_rows,
+    write_json,
+)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default=str(REPO_ROOT / "config" / "experiment_config.yaml"))
+    parser.add_argument("--split", choices=["train", "dev", "test"], required=True)
+    parser.add_argument("--shard-index", type=int, required=True)
+    parser.add_argument("--num-shards", type=int, default=4)
+    parser.add_argument("--device", default="cuda:0")
+    args = parser.parse_args()
+
+    config = read_config(args.config)
+    seed_everything(int(config["seed"]) + args.shard_index)
+    run_dir = ensure_run_dirs(config)
+    source = resolve_repo_path(config["paths"][f"dataset_{args.split}"])
+    rows = shard_rows(read_jsonl(source), args.shard_index, args.num_shards)
+    processor, model = load_processor_and_model(config, args.device)
+
+    arrays = []
+    metadata = []
+    started = time.time()
+    for row in tqdm(rows, desc=f"extract {args.split} shard {args.shard_index}"):
+        array, token_meta = response_mean_activations(
+            processor,
+            model,
+            row["user_prompt"],
+            row["response"],
+            device=args.device,
+            max_input_tokens=int(config["model"]["max_input_tokens"]),
+        )
+        arrays.append(array)
+        metadata.append(
+            {
+                "id": row["id"],
+                "scenario_id": row["scenario_id"],
+                "split": row["split"],
+                "category": row["category"],
+                "combo": row["combo"],
+                "emotion_validation": int(row["emotion_validation"]),
+                "belief_endorsement": int(row["belief_endorsement"]),
+                "user_prompt": row["user_prompt"],
+                "response": row["response"],
+                **token_meta,
+            }
+        )
+
+    activations = np.stack(arrays).astype(np.float16)
+    out_base = run_dir / "activations" / f"residual_{args.split}_shard{args.shard_index:02d}"
+    np.savez_compressed(out_base.with_suffix(".npz"), activations=activations)
+    write_json(out_base.with_suffix(".json"), metadata)
+    write_json(
+        run_dir / "logs" / f"extract_{args.split}_shard{args.shard_index:02d}.json",
+        {
+            "split": args.split,
+            "shard_index": args.shard_index,
+            "num_shards": args.num_shards,
+            "rows": len(rows),
+            "shape": list(activations.shape),
+            "seconds": time.time() - started,
+        },
+    )
+    print(json.dumps({"rows": len(rows), "shape": list(activations.shape)}, indent=2))
+
+
+if __name__ == "__main__":
+    main()
+

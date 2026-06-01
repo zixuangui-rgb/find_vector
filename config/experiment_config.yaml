@@ -1,0 +1,35 @@
+experiment_name: qwen35_9b_emotion_belief_prevalidation_v1
+seed: 20260601
+
+model:
+  model_id: Qwen/Qwen3.5-9B
+  local_path: /data/models/Qwen3.5-9B
+  dtype: float16
+  max_input_tokens: 512
+  max_new_tokens: 128
+
+paths:
+  run_dir: /data/find_vector_runs/qwen35_9b_emotion_belief_prevalidation_v1
+  dataset_all: data/2x2_items_all_v1.jsonl
+  dataset_train: data/2x2_items_train_v1.jsonl
+  dataset_dev: data/2x2_items_dev_v1.jsonl
+  dataset_test: data/2x2_items_test_v1.jsonl
+
+extraction:
+  batch_size: 1
+  pooling: response_mean
+  include_embedding_state: true
+
+probe:
+  c_values: [0.01, 0.1, 1.0, 10.0]
+  max_iter: 3000
+
+steering:
+  alphas_std: [0.25, 0.5, 1.0, 1.5, 2.0]
+  calibration_layers: 4
+  calibration_prompts: 60
+  frozen_single_prompts: 100
+  frozen_multi_prompts: 60
+  frozen_normal_support_prompts: 60
+  frozen_side_effect_prompts: 60
+
