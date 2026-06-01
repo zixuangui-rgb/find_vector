@@ -18,8 +18,12 @@ from sklearn.preprocessing import StandardScaler
 from experiment_common import REPO_ROOT, ensure_run_dirs, read_config, write_csv, write_json
 
 
-def load_split(run_dir: Path, split: str) -> tuple[np.ndarray, list[dict]]:
-    activations = np.load(run_dir / "activations" / f"residual_{split}.npz")["activations"].astype(np.float32)
+def artifact_name(stem: str, pooling: str, suffix: str) -> str:
+    return f"{stem}{suffix}" if pooling == "response_mean" else f"{stem}_{pooling}{suffix}"
+
+
+def load_split(run_dir: Path, split: str, pooling: str) -> tuple[np.ndarray, list[dict]]:
+    activations = np.load(run_dir / "activations" / f"residual_{split}.npz")[pooling].astype(np.float32)
     metadata = json.loads((run_dir / "activations" / f"residual_{split}.json").read_text(encoding="utf-8"))
     return activations, metadata
 
@@ -52,13 +56,14 @@ def evaluate_conditions(model, x: np.ndarray, metadata: list[dict], concept: str
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=str(REPO_ROOT / "config" / "experiment_config.yaml"))
+    parser.add_argument("--pooling", choices=["response_mean", "response_first", "response_last"], default="response_mean")
     args = parser.parse_args()
 
     config = read_config(args.config)
     run_dir = ensure_run_dirs(config)
-    train_x, train_meta = load_split(run_dir, "train")
-    dev_x, dev_meta = load_split(run_dir, "dev")
-    test_x, test_meta = load_split(run_dir, "test")
+    train_x, train_meta = load_split(run_dir, "train", args.pooling)
+    dev_x, dev_meta = load_split(run_dir, "dev", args.pooling)
+    test_x, test_meta = load_split(run_dir, "test", args.pooling)
     layer_count = int(train_x.shape[1])
     c_values = [float(value) for value in config["probe"]["c_values"]]
     max_iter = int(config["probe"]["max_iter"])
@@ -94,19 +99,20 @@ def main() -> None:
                 "test_f1": test_metrics["f1"],
             }
             metric_rows.append(row)
-            joblib.dump(search.best_estimator_, run_dir / "probes" / f"{concept}_layer{layer:02d}.joblib")
+            probe_dir = run_dir / "probes" / args.pooling
+            probe_dir.mkdir(parents=True, exist_ok=True)
+            joblib.dump(search.best_estimator_, probe_dir / f"{concept}_layer{layer:02d}.joblib")
             for cross in evaluate_conditions(search.best_estimator_, test_x[:, layer, :], test_meta, concept):
                 cross_rows.append({"layer_index": layer, **cross})
             if best_row is None or row["dev_auc"] > best_row["dev_auc"]:
                 best_row = row
         best_by_concept[concept] = best_row
 
-    write_csv(run_dir / "analysis" / "probe_metrics_by_layer.csv", metric_rows)
-    write_csv(run_dir / "analysis" / "probe_cross_condition_metrics.csv", cross_rows)
-    write_json(run_dir / "analysis" / "probe_selection_summary.json", best_by_concept)
+    write_csv(run_dir / "analysis" / artifact_name("probe_metrics_by_layer", args.pooling, ".csv"), metric_rows)
+    write_csv(run_dir / "analysis" / artifact_name("probe_cross_condition_metrics", args.pooling, ".csv"), cross_rows)
+    write_json(run_dir / "analysis" / artifact_name("probe_selection_summary", args.pooling, ".json"), {"pooling": args.pooling, **best_by_concept})
     print(json.dumps(best_by_concept, indent=2))
 
 
 if __name__ == "__main__":
     main()
-

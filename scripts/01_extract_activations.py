@@ -18,7 +18,7 @@ from experiment_common import (
     read_config,
     read_jsonl,
     resolve_repo_path,
-    response_mean_activations,
+    response_pooled_activations,
     seed_everything,
     shard_rows,
     write_json,
@@ -41,11 +41,15 @@ def main() -> None:
     rows = shard_rows(read_jsonl(source), args.shard_index, args.num_shards)
     processor, model = load_processor_and_model(config, args.device)
 
-    arrays = []
+    arrays_by_pooling = {
+        "response_mean": [],
+        "response_first": [],
+        "response_last": [],
+    }
     metadata = []
     started = time.time()
     for row in tqdm(rows, desc=f"extract {args.split} shard {args.shard_index}"):
-        array, token_meta = response_mean_activations(
+        pooled_arrays, token_meta = response_pooled_activations(
             processor,
             model,
             row["user_prompt"],
@@ -53,7 +57,8 @@ def main() -> None:
             device=args.device,
             max_input_tokens=int(config["model"]["max_input_tokens"]),
         )
-        arrays.append(array)
+        for pooling, array in pooled_arrays.items():
+            arrays_by_pooling[pooling].append(array)
         metadata.append(
             {
                 "id": row["id"],
@@ -69,9 +74,13 @@ def main() -> None:
             }
         )
 
-    activations = np.stack(arrays).astype(np.float16)
+    stacked = {
+        pooling: np.stack(arrays).astype(np.float16)
+        for pooling, arrays in arrays_by_pooling.items()
+    }
+    activations = stacked["response_mean"]
     out_base = run_dir / "activations" / f"residual_{args.split}_shard{args.shard_index:02d}"
-    np.savez_compressed(out_base.with_suffix(".npz"), activations=activations)
+    np.savez_compressed(out_base.with_suffix(".npz"), activations=activations, **stacked)
     write_json(out_base.with_suffix(".json"), metadata)
     write_json(
         run_dir / "logs" / f"extract_{args.split}_shard{args.shard_index:02d}.json",
@@ -81,6 +90,7 @@ def main() -> None:
             "num_shards": args.num_shards,
             "rows": len(rows),
             "shape": list(activations.shape),
+            "poolings": sorted(stacked),
             "seconds": time.time() - started,
         },
     )
@@ -89,4 +99,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

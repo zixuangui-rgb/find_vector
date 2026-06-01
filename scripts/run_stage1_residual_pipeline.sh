@@ -24,7 +24,8 @@ for split in train dev test; do
   echo "[$(date '+%F %T')] completed extraction split=$split" | tee -a "$RUN_DIR/logs/stage1_orchestrator.log"
 done
 
-"$PYTHON" scripts/02_build_vectors.py >> "$RUN_DIR/logs/stage1_orchestrator.log" 2>&1
-"$PYTHON" scripts/03_probe_validation.py >> "$RUN_DIR/logs/stage1_orchestrator.log" 2>&1
+for pooling in response_mean response_first response_last; do
+  "$PYTHON" scripts/02_build_vectors.py --pooling "$pooling" >> "$RUN_DIR/logs/stage1_orchestrator.log" 2>&1
+  "$PYTHON" scripts/03_probe_validation.py --pooling "$pooling" >> "$RUN_DIR/logs/stage1_orchestrator.log" 2>&1
+done
 echo "[$(date '+%F %T')] stage1 residual pipeline complete" | tee -a "$RUN_DIR/logs/stage1_orchestrator.log"
-

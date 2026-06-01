@@ -7,8 +7,9 @@ import csv
 import json
 import os
 import random
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import numpy as np
 import torch
@@ -177,7 +178,17 @@ def move_inputs(inputs: dict[str, torch.Tensor], device: str) -> dict[str, torch
     return {key: value.to(device) for key, value in inputs.items()}
 
 
-def response_mean_activations(
+def locate_subsequence(sequence: list[int], subsequence: list[int], start: int = 0) -> tuple[int, int] | None:
+    if not subsequence:
+        return None
+    stop = len(sequence) - len(subsequence) + 1
+    for index in range(max(0, start), max(0, stop)):
+        if sequence[index : index + len(subsequence)] == subsequence:
+            return index, index + len(subsequence)
+    return None
+
+
+def response_pooled_activations(
     processor,
     model,
     user_prompt: str,
@@ -191,7 +202,16 @@ def response_mean_activations(
     full_len = int(full_inputs["input_ids"].shape[-1])
     if full_len > max_input_tokens:
         raise ValueError(f"Tokenized transcript length {full_len} exceeds max_input_tokens={max_input_tokens}")
-    response_start = min(prefix_len, full_len - 1)
+    full_token_ids = full_inputs["input_ids"][0].tolist()
+    response_token_ids = processor.tokenizer.encode(response, add_special_tokens=False)
+    span = locate_subsequence(full_token_ids, response_token_ids, start=max(0, prefix_len - 2))
+    if span is None:
+        response_start = min(prefix_len, full_len - 1)
+        response_end = full_len
+        span_method = "prefix_fallback"
+    else:
+        response_start, response_end = span
+        span_method = "exact_response_subsequence"
     model_inputs = move_inputs(full_inputs, device)
     with torch.inference_mode():
         outputs = model(
@@ -201,17 +221,156 @@ def response_mean_activations(
             return_dict=True,
         )
     hidden_states = get_hidden_states(outputs)
-    pooled = []
+    pooled_mean = []
+    pooled_first = []
+    pooled_last = []
     for state in hidden_states:
-        span = state[:, response_start:full_len, :]
-        pooled.append(span.mean(dim=1).squeeze(0).float().cpu().numpy())
-    array = np.stack(pooled).astype(np.float16)
+        response_state = state[:, response_start:response_end, :]
+        pooled_mean.append(response_state.mean(dim=1).squeeze(0).float().cpu().numpy())
+        pooled_first.append(response_state[:, 0, :].squeeze(0).float().cpu().numpy())
+        pooled_last.append(response_state[:, -1, :].squeeze(0).float().cpu().numpy())
+    arrays = {
+        "response_mean": np.stack(pooled_mean).astype(np.float16),
+        "response_first": np.stack(pooled_first).astype(np.float16),
+        "response_last": np.stack(pooled_last).astype(np.float16),
+    }
     meta = {
         "prefix_tokens": prefix_len,
         "full_tokens": full_len,
-        "response_tokens": max(1, full_len - response_start),
+        "response_start": response_start,
+        "response_end": response_end,
+        "response_tokens": max(1, response_end - response_start),
+        "response_span_method": span_method,
         "hidden_state_count": len(hidden_states),
-        "hidden_size": int(array.shape[-1]),
+        "hidden_size": int(arrays["response_mean"].shape[-1]),
     }
-    return array, meta
+    return arrays, meta
 
+
+def response_mean_activations(
+    processor,
+    model,
+    user_prompt: str,
+    response: str,
+    device: str = "cuda:0",
+    max_input_tokens: int = 512,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    arrays, meta = response_pooled_activations(
+        processor,
+        model,
+        user_prompt,
+        response,
+        device=device,
+        max_input_tokens=max_input_tokens,
+    )
+    return arrays["response_mean"], meta
+
+
+def row_messages(row: dict[str, Any]) -> list[dict[str, Any]]:
+    messages = row.get("messages")
+    if messages:
+        return messages
+    return text_messages(row["user_prompt"])
+
+
+def nested_attr(value: Any, dotted_path: str) -> Any:
+    current = value
+    for part in dotted_path.split("."):
+        current = getattr(current, part)
+    return current
+
+
+def decoder_layers(model) -> tuple[str, torch.nn.ModuleList]:
+    candidates = [
+        "model.language_model.layers",
+        "language_model.model.layers",
+        "model.layers",
+        "language_model.layers",
+    ]
+    for path in candidates:
+        try:
+            layers = nested_attr(model, path)
+        except AttributeError:
+            continue
+        if isinstance(layers, torch.nn.ModuleList) and len(layers) > 0:
+            return path, layers
+    fallback = [
+        (name, module)
+        for name, module in model.named_modules()
+        if name.endswith("layers") and isinstance(module, torch.nn.ModuleList) and len(module) > 4
+    ]
+    if not fallback:
+        raise RuntimeError("Could not locate decoder layer ModuleList")
+    return max(fallback, key=lambda pair: len(pair[1]))
+
+
+def _replace_hidden(output: Any, hidden: torch.Tensor) -> Any:
+    if isinstance(output, tuple):
+        return (hidden, *output[1:])
+    if isinstance(output, list):
+        return [hidden, *output[1:]]
+    return hidden
+
+
+@contextmanager
+def residual_interventions(model, interventions: list[dict[str, Any]]) -> Iterator[None]:
+    """Apply last-token residual additions or erasures at hidden-state layer indices."""
+    if not interventions:
+        yield
+        return
+    _, layers = decoder_layers(model)
+    handles = []
+    for intervention in interventions:
+        layer_index = int(intervention["layer_index"])
+        if layer_index < 1 or layer_index > len(layers):
+            raise ValueError(f"layer_index={layer_index} must be in [1, {len(layers)}]")
+        mode = intervention["mode"]
+        vector = torch.as_tensor(intervention["vector"], dtype=torch.float32)
+        vector = vector / vector.norm().clamp_min(1e-8)
+        magnitude = float(intervention.get("magnitude", 1.0))
+
+        def hook(_module, _inputs, output, *, mode=mode, vector=vector, magnitude=magnitude):
+            hidden = output[0] if isinstance(output, (tuple, list)) else output
+            unit = vector.to(device=hidden.device, dtype=hidden.dtype)
+            target = hidden[:, -1:, :]
+            if mode == "add":
+                updated = target + magnitude * unit.view(1, 1, -1)
+            elif mode == "erase":
+                projection_values = (target * unit.view(1, 1, -1)).sum(dim=-1, keepdim=True)
+                updated = target - projection_values * unit.view(1, 1, -1)
+            else:
+                raise ValueError(f"Unsupported intervention mode: {mode}")
+            hidden = hidden.clone()
+            hidden[:, -1:, :] = updated
+            return _replace_hidden(output, hidden)
+
+        handles.append(layers[layer_index - 1].register_forward_hook(hook))
+    try:
+        yield
+    finally:
+        for handle in handles:
+            handle.remove()
+
+
+def generate_response(
+    processor,
+    model,
+    messages: list[dict[str, Any]],
+    interventions: list[dict[str, Any]] | None = None,
+    device: str = "cuda:0",
+    max_new_tokens: int = 128,
+) -> tuple[str, dict[str, Any]]:
+    inputs = tokenize_chat(processor, messages, add_generation_prompt=True)
+    input_tokens = int(inputs["input_ids"].shape[-1])
+    model_inputs = move_inputs(inputs, device)
+    with residual_interventions(model, interventions or []):
+        with torch.inference_mode():
+            output_ids = model.generate(
+                **model_inputs,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                use_cache=True,
+            )
+    generated_ids = output_ids[0, input_tokens:]
+    text = processor.tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
+    return text, {"input_tokens": input_tokens, "generated_tokens": int(generated_ids.shape[-1])}

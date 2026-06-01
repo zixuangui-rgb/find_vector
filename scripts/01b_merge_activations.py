@@ -21,24 +21,33 @@ def main() -> None:
 
     config = read_config(args.config)
     run_dir = ensure_run_dirs(config)
-    arrays = []
+    arrays_by_pooling = {
+        "response_mean": [],
+        "response_first": [],
+        "response_last": [],
+    }
     metadata = []
     for shard_index in range(args.num_shards):
         base = run_dir / "activations" / f"residual_{args.split}_shard{shard_index:02d}"
-        arrays.append(np.load(base.with_suffix(".npz"))["activations"])
+        shard = np.load(base.with_suffix(".npz"))
+        for pooling in arrays_by_pooling:
+            arrays_by_pooling[pooling].append(shard[pooling])
         metadata.extend(json.loads(base.with_suffix(".json").read_text(encoding="utf-8")))
 
-    merged = np.concatenate(arrays, axis=0)
+    merged_by_pooling = {
+        pooling: np.concatenate(arrays, axis=0)
+        for pooling, arrays in arrays_by_pooling.items()
+    }
+    merged = merged_by_pooling["response_mean"]
     out_base = run_dir / "activations" / f"residual_{args.split}"
-    np.savez_compressed(out_base.with_suffix(".npz"), activations=merged)
+    np.savez_compressed(out_base.with_suffix(".npz"), activations=merged, **merged_by_pooling)
     write_json(out_base.with_suffix(".json"), metadata)
     write_json(
         run_dir / "analysis" / f"activation_shapes_{args.split}.json",
-        {"split": args.split, "rows": len(metadata), "shape": list(merged.shape)},
+        {"split": args.split, "rows": len(metadata), "shape": list(merged.shape), "poolings": sorted(merged_by_pooling)},
     )
     print(json.dumps({"split": args.split, "rows": len(metadata), "shape": list(merged.shape)}, indent=2))
 
 
 if __name__ == "__main__":
     main()
-
