@@ -1,0 +1,25 @@
+.DS_Store
+__pycache__/
+*.pyc
+
+.env
+.venv/
+venv/
+
+# Large runtime artifacts generated on servers
+models/
+checkpoints/
+activations/
+vectors/*.npz
+probes/*.pkl
+responses/*.jsonl
+logs/
+
+# Keep small reports/figures trackable by default, but ignore common bulky arrays.
+*.pt
+*.pth
+*.safetensors
+*.bin
+*.npy
+*.npz
+

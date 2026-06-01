@@ -1,0 +1,6 @@
+kind,n
+scenarios,300
+items,1200
+train_items,800
+dev_items,200
+test_items,200
