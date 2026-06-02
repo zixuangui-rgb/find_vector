@@ -153,13 +153,20 @@ def load_processor_and_model(config: dict[str, Any], device: str = "cuda:0"):
     return processor, model
 
 
-def tokenize_chat(processor, messages: list[dict[str, Any]], add_generation_prompt: bool) -> dict[str, torch.Tensor]:
+def tokenize_chat(
+    processor,
+    messages: list[dict[str, Any]],
+    add_generation_prompt: bool,
+    chat_template_kwargs: dict[str, Any] | None = None,
+) -> dict[str, torch.Tensor]:
+    template_kwargs = chat_template_kwargs or {}
     inputs = processor.apply_chat_template(
         messages,
         add_generation_prompt=add_generation_prompt,
         tokenize=True,
         return_dict=True,
         return_tensors="pt",
+        **template_kwargs,
     )
     return {key: value for key, value in inputs.items() if isinstance(value, torch.Tensor)}
 
@@ -359,8 +366,17 @@ def generate_response(
     interventions: list[dict[str, Any]] | None = None,
     device: str = "cuda:0",
     max_new_tokens: int = 128,
+    chat_template_kwargs: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
-    inputs = tokenize_chat(processor, messages, add_generation_prompt=True)
+    template_kwargs = {"enable_thinking": False}
+    if chat_template_kwargs:
+        template_kwargs.update(chat_template_kwargs)
+    inputs = tokenize_chat(
+        processor,
+        messages,
+        add_generation_prompt=True,
+        chat_template_kwargs=template_kwargs,
+    )
     input_tokens = int(inputs["input_ids"].shape[-1])
     model_inputs = move_inputs(inputs, device)
     with residual_interventions(model, interventions or []):
