@@ -20,7 +20,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def read_config(path: str | Path | None = None) -> dict[str, Any]:
-    config_path = Path(path) if path else REPO_ROOT / "config" / "experiment_config.yaml"
+    requested = path or os.environ.get("FIND_VECTOR_CONFIG")
+    config_path = Path(requested) if requested else REPO_ROOT / "config" / "experiment_config.yaml"
     with config_path.open("r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
@@ -321,7 +322,7 @@ def _replace_hidden(output: Any, hidden: torch.Tensor) -> Any:
 
 @contextmanager
 def residual_interventions(model, interventions: list[dict[str, Any]]) -> Iterator[None]:
-    """Apply last-token residual additions or erasures at hidden-state layer indices."""
+    """Apply residual additions or erasures at hidden-state layer indices."""
     if not interventions:
         yield
         return
@@ -335,11 +336,17 @@ def residual_interventions(model, interventions: list[dict[str, Any]]) -> Iterat
         vector = torch.as_tensor(intervention["vector"], dtype=torch.float32)
         vector = vector / vector.norm().clamp_min(1e-8)
         magnitude = float(intervention.get("magnitude", 1.0))
+        token_position = intervention.get("token_position", "last")
 
-        def hook(_module, _inputs, output, *, mode=mode, vector=vector, magnitude=magnitude):
+        def hook(_module, _inputs, output, *, mode=mode, vector=vector, magnitude=magnitude, token_position=token_position):
             hidden = output[0] if isinstance(output, (tuple, list)) else output
             unit = vector.to(device=hidden.device, dtype=hidden.dtype)
-            target = hidden[:, -1:, :]
+            if token_position == "last":
+                target = hidden[:, -1:, :]
+            elif token_position == "all":
+                target = hidden
+            else:
+                raise ValueError(f"Unsupported token_position: {token_position}")
             if mode == "add":
                 updated = target + magnitude * unit.view(1, 1, -1)
             elif mode == "erase":
@@ -348,7 +355,10 @@ def residual_interventions(model, interventions: list[dict[str, Any]]) -> Iterat
             else:
                 raise ValueError(f"Unsupported intervention mode: {mode}")
             hidden = hidden.clone()
-            hidden[:, -1:, :] = updated
+            if token_position == "last":
+                hidden[:, -1:, :] = updated
+            else:
+                hidden = updated
             return _replace_hidden(output, hidden)
 
         handles.append(layers[layer_index - 1].register_forward_hook(hook))

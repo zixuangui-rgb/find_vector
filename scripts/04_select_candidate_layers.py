@@ -81,7 +81,14 @@ def main() -> None:
         ranked,
         key=lambda row: mean([row["emotion_dev_auc"], row["belief_dev_auc"]]) - row["abs_cos_emotion_belief"],
     )["layer_index"]
-    preferred = [ranked[0]["layer_index"], best_emotion, best_belief, best_low_cos]
+    layer_count = max(row["layer_index"] for row in ranked) + 1
+    thirds = [
+        [row for row in ranked if 1 <= row["layer_index"] <= max(2, layer_count // 4)],
+        [row for row in ranked if max(3, layer_count // 4 + 1) <= row["layer_index"] <= max(4, layer_count // 2)],
+        [row for row in ranked if row["layer_index"] > max(4, layer_count // 2)],
+    ]
+    stratified = [group[0]["layer_index"] for group in thirds if group]
+    preferred = [ranked[0]["layer_index"], best_emotion, best_belief, best_low_cos, *stratified]
     preferred.extend(row["layer_index"] for row in ranked)
     selected = []
     for layer in preferred:

@@ -20,6 +20,7 @@ from experiment_common import (
     seed_everything,
     shard_rows,
     write_json,
+    resolve_repo_path,
 )
 
 
@@ -34,7 +35,8 @@ def main() -> None:
     config = read_config(args.config)
     seed_everything(int(config["seed"]) + args.shard_index)
     run_dir = ensure_run_dirs(config)
-    rows = shard_rows(read_jsonl(REPO_ROOT / "data" / "2x2_items_natural_generalization_v1.jsonl"), args.shard_index, args.num_shards)
+    natural_path = config.get("paths", {}).get("natural_generalization", "data/2x2_items_natural_generalization_v1.jsonl")
+    rows = shard_rows(read_jsonl(resolve_repo_path(natural_path)), args.shard_index, args.num_shards)
     processor, model = load_processor_and_model(config, args.device)
 
     arrays_by_pooling = {"response_mean": [], "response_first": [], "response_last": []}

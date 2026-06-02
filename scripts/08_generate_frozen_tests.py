@@ -38,6 +38,7 @@ def add_intervention(component: dict, candidates: dict, vectors) -> dict:
         "layer_index": layer,
         "vector": vectors[direction][layer],
         "magnitude": sign * float(component["alpha_std"]) * scale,
+        "token_position": component.get("token_position", "last"),
     }
 
 
@@ -74,9 +75,64 @@ def condition_specs(config: dict, frozen: dict, candidates: dict, vectors) -> li
                         "mode": "erase",
                         "layer_index": erase["layer_index"],
                         "vector": vectors[erase["direction"]][erase["layer_index"]],
+                        "token_position": erase.get("token_position", "last"),
                     }
                 ],
                 **erase,
+            }
+        )
+    multi = selected.get("multi_layer_emotion_add_belief_subtract")
+    if multi:
+        layers = [int(value) for value in str(multi["layer_index"]).split("_") if value]
+        alpha = float(multi["alpha_std"])
+        token_position = multi.get("token_position", "last")
+        interventions = []
+        for layer in layers:
+            emotion_scale = float(candidates["layer_scales"][str(layer)]["emotion"]["projection_std"])
+            belief_scale = float(candidates["layer_scales"][str(layer)]["belief"]["projection_std"])
+            interventions.extend(
+                [
+                    {
+                        "mode": "add",
+                        "layer_index": layer,
+                        "vector": vectors["emotion"][layer],
+                        "magnitude": alpha * emotion_scale / len(layers),
+                        "token_position": token_position,
+                    },
+                    {
+                        "mode": "add",
+                        "layer_index": layer,
+                        "vector": vectors["belief"][layer],
+                        "magnitude": -alpha * belief_scale / len(layers),
+                        "token_position": token_position,
+                    },
+                ]
+            )
+        specs.append(
+            {
+                **multi,
+                "condition_id": "multi_layer_emotion_add_belief_subtract",
+                "kind": "multi_layer_composed_addition",
+                "interventions": interventions,
+            }
+        )
+    if "style_control" in selected:
+        specs.append(
+            {
+                "condition_id": "style_control",
+                "kind": "system_prompt_control",
+                "interventions": [],
+                **selected["style_control"],
+            }
+        )
+    if "belief_subtract" in selected:
+        specs.append(
+            {
+                "condition_id": "gated_belief_subtract",
+                "kind": "gated_target_addition",
+                "gated_from": "belief_subtract",
+                "interventions": [add_intervention(selected["belief_subtract"], candidates, vectors)],
+                **selected["belief_subtract"],
             }
         )
     for match_name in ["emotion_add", "belief_subtract"]:
@@ -119,6 +175,21 @@ def serializable_spec(spec: dict) -> dict:
     return {key: value for key, value in spec.items() if key != "interventions"}
 
 
+def messages_for_condition(prompt: dict, spec: dict) -> list[dict]:
+    messages = row_messages(prompt)
+    if spec.get("system_prompt"):
+        return [{"role": "system", "content": [{"type": "text", "text": spec["system_prompt"]}]}, *messages]
+    return messages
+
+
+def interventions_for_prompt(prompt: dict, spec: dict) -> list[dict]:
+    if spec.get("kind") == "gated_target_addition":
+        if prompt.get("benchmark_group") in {"behavior"} or prompt.get("evaluation_split") in {"frozen_behavior", "challenge"}:
+            return spec["interventions"]
+        return []
+    return spec["interventions"]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=str(REPO_ROOT / "config" / "experiment_config.yaml"))
@@ -131,9 +202,10 @@ def main() -> None:
     config = read_config(args.config)
     seed_everything(int(config["seed"]) + args.shard_index)
     run_dir = ensure_run_dirs(config)
+    prompt_path = REPO_ROOT / config.get("paths", {}).get("generation_prompts", "data/generation_prompts_v1.jsonl")
     prompts = [
         row
-        for row in read_jsonl(REPO_ROOT / "data" / "generation_prompts_v1.jsonl")
+        for row in read_jsonl(prompt_path)
         if row["evaluation_split"] != "calibration"
     ]
     candidates = json.loads((run_dir / "analysis" / "candidate_layers.json").read_text(encoding="utf-8"))
@@ -160,8 +232,8 @@ def main() -> None:
             response, token_meta = generate_response(
                 processor,
                 model,
-                row_messages(prompt),
-                interventions=spec["interventions"],
+                messages_for_condition(prompt, spec),
+                interventions=interventions_for_prompt(prompt, spec),
                 device=args.device,
                 max_new_tokens=args.max_new_tokens,
             )
@@ -171,6 +243,8 @@ def main() -> None:
                 "evaluation_split": prompt["evaluation_split"],
                 "prompt_type": prompt["prompt_type"],
                 "category": prompt["category"],
+                "benchmark_group": prompt.get("benchmark_group"),
+                "benchmark_source": prompt.get("benchmark_source"),
                 "user_prompt": prompt["user_prompt"],
                 "claim": prompt.get("claim"),
                 "expected_answer": prompt.get("expected_answer"),

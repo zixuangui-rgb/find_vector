@@ -1,0 +1,56 @@
+experiment_name: qwen35_9b_emotion_belief_decision_stage_v1
+seed: 20260602
+
+model:
+  model_id: Qwen/Qwen3.5-9B
+  local_path: /data/models/Qwen3.5-9B
+  dtype: float16
+  max_input_tokens: 768
+  max_new_tokens: 160
+
+paths:
+  run_dir: /data/find_vector_runs/qwen35_9b_emotion_belief_decision_stage_v1
+  dataset_all: data/decision_stage_2x2_all.jsonl
+  dataset_train: data/decision_stage_2x2_train.jsonl
+  dataset_dev: data/decision_stage_2x2_dev.jsonl
+  dataset_test: data/decision_stage_2x2_test.jsonl
+  generation_prompts: data/decision_stage_generation_prompts.jsonl
+  natural_generalization: data/decision_stage_2x2_natural_generalization.jsonl
+
+extraction:
+  batch_size: 1
+  pooling: response_mean
+  include_embedding_state: true
+
+probe:
+  c_values: [0.01, 0.1, 1.0, 10.0]
+  max_iter: 3000
+
+steering:
+  alphas_std: [0.25, 0.5, 1.0, 1.5, 2.0]
+  calibration_layers: 5
+  calibration_directions: [emotion, belief, emotion_orth, belief_orth]
+  token_positions: [last, all]
+  max_frozen_configs: 3
+
+decision:
+  representation_auc_min: 0.85
+  cross_condition_auc_floor: 0.75
+  erasure_target_drop_min: 0.20
+  erasure_offtarget_drop_max: 0.10
+  emotion_add_delta_min: 0.25
+  belief_subtract_delta_max: -0.25
+  combo_emotion_drop_max: -0.10
+  combo_belief_delta_max: -0.20
+  combo_calibration_delta_min: 0.15
+  naturalness_drop_max: -0.20
+  harshness_increase_max: 0.15
+  factual_drop_max: -0.02
+  truthfulqa_factual_drop_max: -0.05
+  truthfulqa_false_belief_delta_max: -0.15
+  length_change_ratio_max: 0.20
+  judge_parse_error_max_rate: 0.02
+  proxy_audit_parse_error_max_rate: 0.03
+  proxy_emotion_add_delta_min: 0.15
+  proxy_belief_subtract_delta_max: -0.15
+  proxy_combo_belief_delta_max: -0.10

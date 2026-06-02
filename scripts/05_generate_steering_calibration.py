@@ -27,32 +27,38 @@ from experiment_common import (
 def condition_specs(config: dict, candidates: dict, vectors) -> list[dict]:
     specs = [{"condition_id": "base", "interventions": [], "kind": "base"}]
     alphas = [float(value) for value in config["steering"]["alphas_std"]]
+    token_positions = config.get("steering", {}).get("token_positions", ["last"])
     seed = int(config["seed"])
-    for layer in candidates["selected_layers"]:
+    selected_layers = [int(layer) for layer in candidates["selected_layers"]]
+    calibration_directions = config.get("steering", {}).get("calibration_directions", ["emotion", "belief", "emotion_orth", "belief_orth"])
+    for layer in selected_layers:
         scales = candidates["layer_scales"][str(layer)]
-        for direction in ["emotion", "belief", "emotion_orth", "belief_orth"]:
+        for direction in calibration_directions:
             for sign_name, sign in [("pos", 1.0), ("neg", -1.0)]:
                 for alpha in alphas:
-                    magnitude = sign * alpha * float(scales[direction]["projection_std"])
-                    specs.append(
-                        {
-                            "condition_id": f"add_{direction}_L{layer}_{sign_name}_a{alpha:g}",
-                            "kind": "target_addition",
-                            "direction": direction,
-                            "layer_index": layer,
-                            "sign": sign_name,
-                            "alpha_std": alpha,
-                            "magnitude": magnitude,
-                            "interventions": [
-                                {
-                                    "mode": "add",
-                                    "layer_index": layer,
-                                    "vector": vectors[direction][layer],
-                                    "magnitude": magnitude,
-                                }
-                            ],
-                        }
-                    )
+                    for token_position in token_positions:
+                        magnitude = sign * alpha * float(scales[direction]["projection_std"])
+                        specs.append(
+                            {
+                                "condition_id": f"add_{direction}_L{layer}_{sign_name}_a{alpha:g}_{token_position}",
+                                "kind": "target_addition",
+                                "direction": direction,
+                                "layer_index": layer,
+                                "sign": sign_name,
+                                "alpha_std": alpha,
+                                "magnitude": magnitude,
+                                "token_position": token_position,
+                                "interventions": [
+                                    {
+                                        "mode": "add",
+                                        "layer_index": layer,
+                                        "vector": vectors[direction][layer],
+                                        "magnitude": magnitude,
+                                        "token_position": token_position,
+                                    }
+                                ],
+                            }
+                        )
         rng = np.random.default_rng(seed + layer)
         random_vector = rng.normal(size=vectors["emotion"][layer].shape).astype(np.float32)
         random_vector /= max(float(np.linalg.norm(random_vector)), 1e-8)
@@ -60,24 +66,75 @@ def condition_specs(config: dict, candidates: dict, vectors) -> list[dict]:
         for sign_name, sign in [("pos", 1.0), ("neg", -1.0)]:
             for alpha in [1.0, 2.0]:
                 magnitude = sign * alpha * scale
-                specs.append(
-                    {
-                        "condition_id": f"add_random_L{layer}_{sign_name}_a{alpha:g}",
-                        "kind": "random_addition",
-                        "direction": "random",
-                        "layer_index": layer,
-                        "sign": sign_name,
-                        "alpha_std": alpha,
-                        "magnitude": magnitude,
-                        "random_seed": seed + layer,
-                        "interventions": [
+                for token_position in token_positions:
+                    specs.append(
+                        {
+                            "condition_id": f"add_random_L{layer}_{sign_name}_a{alpha:g}_{token_position}",
+                            "kind": "random_addition",
+                            "direction": "random",
+                            "layer_index": layer,
+                            "sign": sign_name,
+                            "alpha_std": alpha,
+                            "magnitude": magnitude,
+                            "token_position": token_position,
+                            "random_seed": seed + layer,
+                            "interventions": [
+                                {
+                                    "mode": "add",
+                                    "layer_index": layer,
+                                    "vector": random_vector,
+                                    "magnitude": magnitude,
+                                    "token_position": token_position,
+                                }
+                            ],
+                        }
+                    )
+    layer_groups = [
+        selected_layers[:2],
+        selected_layers[:3],
+        sorted(set(selected_layers[:2] + [layer for layer in selected_layers if 9 <= layer <= 16][:2])),
+    ]
+    seen_groups = set()
+    for group in layer_groups:
+        group = tuple(group)
+        if len(group) < 2 or group in seen_groups:
+            continue
+        seen_groups.add(group)
+        for alpha in [0.5, 1.0, 1.5]:
+            for token_position in token_positions:
+                interventions = []
+                for layer in group:
+                    emotion_scale = float(candidates["layer_scales"][str(layer)]["emotion"]["projection_std"])
+                    belief_scale = float(candidates["layer_scales"][str(layer)]["belief"]["projection_std"])
+                    interventions.extend(
+                        [
                             {
                                 "mode": "add",
                                 "layer_index": layer,
-                                "vector": random_vector,
-                                "magnitude": magnitude,
-                            }
-                        ],
+                                "vector": vectors["emotion"][layer],
+                                "magnitude": alpha * emotion_scale / len(group),
+                                "token_position": token_position,
+                            },
+                            {
+                                "mode": "add",
+                                "layer_index": layer,
+                                "vector": vectors["belief"][layer],
+                                "magnitude": -alpha * belief_scale / len(group),
+                                "token_position": token_position,
+                            },
+                        ]
+                    )
+                layer_tag = "_".join(str(layer) for layer in group)
+                specs.append(
+                    {
+                        "condition_id": f"multi_emotion_pos_belief_neg_L{layer_tag}_a{alpha:g}_{token_position}",
+                        "kind": "multi_layer_composed_addition",
+                        "direction": "emotion_plus_belief_minus",
+                        "layer_index": layer_tag,
+                        "sign": "combo",
+                        "alpha_std": alpha,
+                        "token_position": token_position,
+                        "interventions": interventions,
                     }
                 )
     return specs
@@ -104,9 +161,10 @@ def main() -> None:
     config = read_config(args.config)
     seed_everything(int(config["seed"]) + args.shard_index)
     run_dir = ensure_run_dirs(config)
+    prompt_path = REPO_ROOT / config.get("paths", {}).get("generation_prompts", "data/generation_prompts_v1.jsonl")
     prompts = [
         row
-        for row in read_jsonl(REPO_ROOT / "data" / "generation_prompts_v1.jsonl")
+        for row in read_jsonl(prompt_path)
         if row["evaluation_split"] == "calibration"
     ]
     candidates = json.loads((run_dir / "analysis" / "candidate_layers.json").read_text(encoding="utf-8"))

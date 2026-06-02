@@ -54,6 +54,7 @@ def main() -> None:
             "layer_index": first.get("layer_index"),
             "sign": first.get("sign"),
             "alpha_std": first.get("alpha_std"),
+            "token_position": first.get("token_position"),
             "n": len(values),
         }
         for field in SCORE_FIELDS:
